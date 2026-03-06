@@ -1603,7 +1603,7 @@
                     ${q.type !== '判断题' ? `
                         <ul class="options-list">
                             ${Object.entries(q.options).map(([key, val]) => `
-                                <li class="option-item ${selectedAnswer === key ? 'selected' : ''}" 
+                                <li class="option-item ${selectedAnswer && selectedAnswer.includes(key) ? 'selected' : ''}" 
                                     onclick="selectAnswer('${key}')">
                                     <span class="option-letter">${key}</span>
                                     <span>${val}</span>
