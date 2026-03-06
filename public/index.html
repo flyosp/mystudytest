@@ -25,6 +25,7 @@
             --glass: rgba(255, 255, 255, 0.05);
             --gradient-start: #0f0f23;
             --gradient-end: #1a1a2e;
+            --bg-secondary: rgba(255, 255, 255, 0.05);
         }
 
         * {
@@ -351,6 +352,12 @@
             min-width: 140px;
         }
 
+        .filter-select option {
+            background: var(--secondary);
+            color: var(--text-primary);
+            padding: 10px;
+        }
+
         .filter-select:focus {
             border-color: var(--accent);
         }
@@ -395,9 +402,13 @@
         .type-multi { background: rgba(168, 85, 247, 0.2); color: #c084fc; }
         .type-judge { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
 
-        .question-id {
-            font-size: 0.8rem;
+        .question-header .question-id, .question-id {
+            font-size: 0.75rem;
             color: var(--text-muted);
+            background: var(--bg-secondary);
+            padding: 4px 10px;
+            border-radius: 4px;
+            white-space: nowrap;
         }
 
         .question-content {
@@ -1023,6 +1034,9 @@
                 <div class="stats-grid" id="statsGrid"></div>
                 <div style="margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
                     <button class="btn btn-secondary" id="viewQuestionsBtn">查看全部试题</button>
+                    <button class="btn btn-secondary" id="exportDataBtn">💾 导出备份</button>
+                    <button class="btn btn-secondary" id="importDataBtn">📂 导入备份</button>
+                    <input type="file" id="importDataInput" accept=".json" style="display: none;">
                     <button class="btn btn-secondary" id="clearDataBtn">清空数据</button>
                 </div>
             </div>
@@ -1117,8 +1131,10 @@
         <section id="exams-panel" class="panel">
             <div class="card">
                 <h2 class="card-title">考卷管理</h2>
-                <div style="margin-bottom: 20px;">
+                <div style="margin-bottom: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
                     <button class="btn btn-primary" id="createExamBtn">➕ 创建新考卷</button>
+                    <button class="btn btn-secondary" id="importExamBtn">📥 导入考卷</button>
+                    <input type="file" id="examFileInput" accept=".xlsx,.xls" style="display: none;">
                 </div>
                 <div id="examList"></div>
             </div>
@@ -1173,6 +1189,7 @@
         const PROGRESS_KEY = 'questionBank_progress';
         const HISTORY_KEY = 'questionBank_history';
         const EXAMS_KEY = 'questionBank_exams';
+        const EXAM_STATE_KEY = 'questionBank_examState';
 
         let questions = [];
         let exams = [];
@@ -1185,12 +1202,17 @@
         let examStartTime = null;
         let examTimeLimit = 30 * 60;
         let currentExamId = null;
+        let currentExamState = null;
 
         function init() {
             loadData();
             setupEventListeners();
             renderProgress();
             renderExamList();
+            setTimeout(() => {
+                if (!resumeExam()) {
+                }
+            }, 500);
         }
 
         function loadData() {
@@ -1198,6 +1220,7 @@
             const savedProgress = localStorage.getItem(PROGRESS_KEY);
             const savedHistory = localStorage.getItem(HISTORY_KEY);
             const savedExams = localStorage.getItem(EXAMS_KEY);
+            const savedExamState = localStorage.getItem(EXAM_STATE_KEY);
 
             if (savedQuestions) {
                 questions = JSON.parse(savedQuestions);
@@ -1212,6 +1235,19 @@
             if (savedExams) {
                 exams = JSON.parse(savedExams);
             }
+            if (savedExamState) {
+                currentExamState = JSON.parse(savedExamState);
+                if (currentExamState && currentExamState.examQuestions) {
+                    examQuestions = currentExamState.examQuestions;
+                    userAnswers = currentExamState.userAnswers || {};
+                    currentStudyIndex = currentExamState.currentStudyIndex || 0;
+                    examTimeLimit = currentExamState.examTimeLimit || 30 * 60;
+                    currentExamId = currentExamState.currentExamId || null;
+                    if (currentExamState.examStartTime) {
+                        examStartTime = currentExamState.examStartTime;
+                    }
+                }
+            }
         }
 
         function saveData() {
@@ -1219,6 +1255,123 @@
             localStorage.setItem(PROGRESS_KEY, JSON.stringify(progress));
             localStorage.setItem(HISTORY_KEY, JSON.stringify(studyHistory));
             localStorage.setItem(EXAMS_KEY, JSON.stringify(exams));
+        }
+
+        function exportAllData() {
+            if (questions.length === 0) {
+                showToast('没有数据可导出', 'warning');
+                return;
+            }
+
+            const exportData = {
+                version: '1.0',
+                exportTime: new Date().toISOString(),
+                questions: questions,
+                exams: exams,
+                progress: progress,
+                studyHistory: studyHistory
+            };
+
+            const dataStr = JSON.stringify(exportData, null, 2);
+            const blob = new Blob([dataStr], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `题库备份_${new Date().toISOString().slice(0, 10)}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+            showToast('数据导出成功', 'success');
+        }
+
+        function importBackupData(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                try {
+                    const data = JSON.parse(event.target.result);
+                    
+                    if (!data.questions || !Array.isArray(data.questions)) {
+                        showToast('备份文件格式不正确', 'error');
+                        return;
+                    }
+
+                    if (!confirm(`确定要导入备份吗？这将覆盖当前所有数据。\n\n当前题目数: ${questions.length}\n备份题目数: ${data.questions.length}`)) {
+                        return;
+                    }
+
+                    questions = data.questions || [];
+                    exams = data.exams || [];
+                    progress = data.progress || { marked: [], completed: [], wrongAnswers: {} };
+                    studyHistory = data.studyHistory || [];
+
+                    saveData();
+                    showImportStats();
+                    renderExamList();
+                    renderProgress();
+                    
+                    showToast(`导入成功！共导入 ${questions.length} 道题目`, 'success');
+                } catch (err) {
+                    showToast('导入失败: ' + err.message, 'error');
+                }
+            };
+            reader.readAsText(file);
+            e.target.value = '';
+        }
+
+        function saveExamState() {
+            if (examQuestions.length > 0) {
+                currentExamState = {
+                    examQuestions: examQuestions,
+                    userAnswers: userAnswers,
+                    currentStudyIndex: currentStudyIndex,
+                    examTimeLimit: examTimeLimit,
+                    examStartTime: examStartTime,
+                    currentExamId: currentExamId,
+                    savedAt: new Date().toISOString()
+                };
+                localStorage.setItem(EXAM_STATE_KEY, JSON.stringify(currentExamState));
+            }
+        }
+
+        function clearExamState() {
+            currentExamState = null;
+            localStorage.removeItem(EXAM_STATE_KEY);
+        }
+
+        function resumeExam() {
+            if (currentExamState && currentExamState.examQuestions && currentExamState.examQuestions.length > 0) {
+                if (confirm('检测到上次考试未完成，是否继续？')) {
+                    examQuestions = currentExamState.examQuestions;
+                    userAnswers = currentExamState.userAnswers || {};
+                    currentStudyIndex = currentExamState.currentStudyIndex || 0;
+                    examTimeLimit = currentExamState.examTimeLimit || 30 * 60;
+                    examStartTime = currentExamState.examStartTime;
+                    currentExamId = currentExamState.currentExamId || null;
+
+                    document.getElementById('examConfig').classList.add('hidden');
+                    document.getElementById('examContent').classList.remove('hidden');
+                    document.getElementById('examResult').classList.add('hidden');
+
+                    document.getElementById('totalCount').textContent = examQuestions.length;
+                    updateProgress();
+
+                    switchTab('exam');
+                    renderQuestionIndicator();
+                    renderExamQuestion();
+                    startTimer();
+                    showToast('已恢复考试进度', 'success');
+                    return true;
+                } else {
+                    clearExamState();
+                }
+            }
+            return false;
         }
 
         function setupEventListeners() {
@@ -1275,8 +1428,18 @@
                 }
             });
 
+            document.getElementById('exportDataBtn').addEventListener('click', exportAllData);
+            document.getElementById('importDataBtn').addEventListener('click', () => {
+                document.getElementById('importDataInput').click();
+            });
+            document.getElementById('importDataInput').addEventListener('change', importBackupData);
+
             document.getElementById('createExamBtn').addEventListener('click', () => openExamModal());
             document.getElementById('saveExamBtn').addEventListener('click', saveExam);
+            document.getElementById('importExamBtn').addEventListener('click', () => {
+                document.getElementById('examFileInput').click();
+            });
+            document.getElementById('examFileInput').addEventListener('change', handleExamFile);
         }
 
         function switchTab(tabName) {
@@ -1511,12 +1674,13 @@
                             <button class="btn btn-secondary" onclick="toggleMark(${q.id})">
                                 ${progress.marked.includes(q.id) ? '⭐ 已标记' : '☆ 标记重点'}
                             </button>
+                            <button class="btn btn-danger" onclick="deleteQuestion(${q.id})">
+                                🗑️ 删除
+                            </button>
                         </div>
                     </div>
                 </div>
             `).join('');
-
-            container.scrollIntoView({ behavior: 'smooth' });
         }
 
         function toggleMark(questionId) {
@@ -1530,6 +1694,34 @@
             }
             saveData();
             renderStudyList();
+        }
+
+        function deleteQuestion(questionId) {
+            if (!confirm('确定要删除这道题目吗？此操作不可恢复。')) {
+                return;
+            }
+            
+            const qId = String(questionId);
+            questions = questions.filter(q => q.id !== questionId);
+            
+            if (progress.wrongAnswers[qId]) {
+                delete progress.wrongAnswers[qId];
+            }
+            
+            const markedIdx = progress.marked.indexOf(questionId);
+            if (markedIdx > -1) {
+                progress.marked.splice(markedIdx, 1);
+            }
+            
+            exams.forEach(exam => {
+                exam.questionIds = exam.questionIds.filter(id => id !== questionId);
+            });
+            
+            saveData();
+            showImportStats();
+            renderStudyList();
+            renderExamList();
+            showToast('题目已删除', 'success');
         }
 
         function startExam() {
@@ -1585,13 +1777,15 @@
             currentStudyIndex = idx;
             renderQuestionIndicator();
             renderExamQuestion();
+            saveExamState();
         }
 
         function renderExamQuestion() {
             const q = examQuestions[currentStudyIndex];
             const container = document.getElementById('examQuestionArea');
             const typeClass = { '单选题': 'type-single', '多选题': 'type-multi', '判断题': 'type-judge' };
-            const selectedAnswer = userAnswers[q.id];
+            const qId = String(q.id);
+            const selectedAnswer = userAnswers[qId];
 
             container.innerHTML = `
                 <div class="question-card">
@@ -1638,16 +1832,17 @@
 
         function selectAnswer(answer) {
             const q = examQuestions[currentStudyIndex];
+            const qId = String(q.id);
             if (q.type === '多选题') {
-                if (!userAnswers[q.id]) userAnswers[q.id] = '';
-                const current = userAnswers[q.id];
+                if (!userAnswers[qId]) userAnswers[qId] = '';
+                const current = userAnswers[qId];
                 if (current.includes(answer)) {
-                    userAnswers[q.id] = current.replace(answer, '');
+                    userAnswers[qId] = current.replace(answer, '');
                 } else {
-                    userAnswers[q.id] = (current + answer).split('').sort().join('');
+                    userAnswers[qId] = (current + answer).split('').sort().join('');
                 }
             } else {
-                userAnswers[q.id] = answer;
+                userAnswers[qId] = answer;
             }
 
             updateProgress();
@@ -1660,6 +1855,7 @@
                 currentStudyIndex--;
                 renderQuestionIndicator();
                 renderExamQuestion();
+                saveExamState();
             }
         }
 
@@ -1668,6 +1864,7 @@
                 currentStudyIndex++;
                 renderQuestionIndicator();
                 renderExamQuestion();
+                saveExamState();
             }
         }
 
@@ -1714,11 +1911,13 @@
 
         function submitExam() {
             clearInterval(examTimer);
+            clearExamState();
 
             let correct = 0, wrong = 0, missed = 0;
 
             examQuestions.forEach(q => {
-                const userAns = userAnswers[q.id];
+                const qId = String(q.id);
+                const userAns = userAnswers[qId];
                 if (!userAns) {
                     missed++;
                 } else if (q.type === '多选题') {
@@ -1780,12 +1979,13 @@
             container.innerHTML = `
                 <div class="card">
                     <h2 class="card-title">错题解析</h2>
-                    ${wrongQs.map(q => {
+                    ${wrongQs.map((q, idx) => {
                         const wrongInfo = progress.wrongAnswers[q.id];
                         return `
                             <div class="question-card">
                                 <div class="question-header">
                                     <span class="question-type ${typeClass[q.type]}">${q.type}</span>
+                                    <span class="question-id">#${idx + 1}</span>
                                 </div>
                                 <div class="question-content">${q.question}</div>
                                 <div class="answer-section">
@@ -2071,6 +2271,128 @@
             renderQuestionIndicator();
             renderExamQuestion();
             startTimer();
+        }
+
+        function handleExamFile(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const validExtensions = ['.xlsx', '.xls'];
+            const fileName = file.name.toLowerCase();
+            const isValid = validExtensions.some(ext => fileName.endsWith(ext));
+
+            if (!isValid) {
+                showToast('请上传 .xlsx 或 .xls 格式的文件', 'error');
+                return;
+            }
+
+            if (questions.length === 0) {
+                showToast('请先导入试题后再导入考卷', 'error');
+                return;
+            }
+
+            showProgress('正在解析考卷文件...');
+
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                try {
+                    const data = new Uint8Array(event.target.result);
+                    const workbook = XLSX.read(data, { type: 'array' });
+                    const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+                    const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
+
+                    importExamFromData(jsonData);
+                } catch (err) {
+                    hideProgress();
+                    showToast('文件解析失败: ' + err.message, 'error');
+                }
+            };
+            reader.readAsArrayBuffer(file);
+            e.target.value = '';
+        }
+
+        function importExamFromData(data) {
+            if (!data || data.length < 2) {
+                hideProgress();
+                showToast('Excel文件为空或格式不正确', 'error');
+                return;
+            }
+
+            const headers = data[0].map(h => h ? String(h).trim() : '');
+            const examNameHeader = headers.find(h => h.includes('考卷') || h.includes('名称') || h.includes('试卷') || h.includes('name'));
+            const questionHeader = headers.find(h => h.includes('题目') || h.includes('题号') || h.includes('question'));
+
+            if (!examNameHeader || !questionHeader) {
+                hideProgress();
+                showToast('Excel表头格式不正确，需要包含"考卷名称"和"题目"列', 'error');
+                return;
+            }
+
+            const headerMap = {};
+            headers.forEach((h, i) => { headerMap[h] = i; });
+
+            const examNameIndex = headerMap[examNameHeader];
+            const questionIndex = headerMap[questionHeader];
+
+            const examsMap = {};
+            let importedCount = 0;
+
+            for (let i = 1; i < data.length; i++) {
+                const row = data[i];
+                const examName = String(row[examNameIndex] || '').trim();
+                const questionText = String(row[questionIndex] || '').trim();
+
+                if (!examName || !questionText) continue;
+
+                if (!examsMap[examName]) {
+                    examsMap[examName] = {
+                        id: Date.now() + Math.random(),
+                        name: examName,
+                        duration: 30,
+                        questionIds: [],
+                        importedAt: new Date().toISOString()
+                    };
+                }
+
+                const matchedQuestion = questions.find(q => 
+                    q.question.includes(questionText) || questionText.includes(q.question.substring(0, 20))
+                );
+                
+                if (matchedQuestion) {
+                    if (!examsMap[examName].questionIds.includes(matchedQuestion.id)) {
+                        examsMap[examName].questionIds.push(matchedQuestion.id);
+                    }
+                    importedCount++;
+                }
+            }
+
+            hideProgress();
+
+            const newExams = Object.values(examsMap).filter(e => e.questionIds.length > 0);
+            
+            if (newExams.length === 0) {
+                showToast('未能匹配到任何题目，请检查Excel中的题目是否与题库匹配', 'warning');
+                return;
+            }
+
+            const existingExamNames = exams.map(e => e.name);
+            let addedCount = 0;
+            let skippedCount = 0;
+
+            newExams.forEach(newExam => {
+                if (existingExamNames.includes(newExam.name)) {
+                    const existingIdx = exams.findIndex(e => e.name === newExam.name);
+                    exams[existingIdx].questionIds = [...new Set([...exams[existingIdx].questionIds, ...newExam.questionIds])];
+                    skippedCount++;
+                } else {
+                    exams.push(newExam);
+                    addedCount++;
+                }
+            });
+
+            saveData();
+            renderExamList();
+            showToast(`导入成功！新增 ${addedCount} 个考卷，更新 ${skippedCount} 个考卷，共匹配 ${importedCount} 道题目`, 'success');
         }
 
         document.addEventListener('DOMContentLoaded', init);
