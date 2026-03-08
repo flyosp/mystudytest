@@ -152,6 +152,8 @@
             padding: 30px;
             margin-bottom: 20px;
             backdrop-filter: blur(10px);
+            word-break: break-word;
+            overflow-wrap: break-word;
         }
 
         .card-title {
@@ -415,6 +417,8 @@
             font-size: 1.05rem;
             line-height: 1.8;
             margin-bottom: 20px;
+            word-break: break-word;
+            overflow-wrap: break-word;
         }
 
         .question-content code, code {
@@ -456,6 +460,9 @@
 
         .options-list {
             list-style: none;
+            overflow-x: hidden;
+            word-break: break-word;
+            overflow-wrap: break-word;
         }
 
         .option-item {
@@ -466,13 +473,20 @@
             cursor: pointer;
             transition: all 0.3s ease;
             display: flex;
-            align-items: center;
+            align-items: flex-start;
             gap: 12px;
+            word-break: break-word;
+            overflow-wrap: break-word;
+            overflow: hidden;
         }
 
         .option-item:hover {
             background: var(--glass);
             border-color: var(--accent);
+        }
+
+        .option-item:hover .option-letter {
+            transform: scale(1.05);
         }
 
         .option-item.correct {
@@ -490,6 +504,29 @@
             border-color: var(--accent);
         }
 
+        .option-item.correct {
+            background: rgba(46, 213, 115, 0.15);
+            border-color: var(--success);
+        }
+
+        .option-item.wrong {
+            background: rgba(255, 71, 87, 0.15);
+            border-color: #ff4757;
+        }
+
+        .answer-badge {
+            margin-left: auto;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            background: var(--success);
+            color: white;
+        }
+
+        .answer-badge.user-ans {
+            background: #ff4757;
+        }
+
         .option-letter {
             width: 28px;
             height: 28px;
@@ -503,10 +540,19 @@
             flex-shrink: 0;
         }
 
+        .option-item span:last-child {
+            flex: 1;
+            min-width: 0;
+            word-break: break-word;
+            overflow-wrap: break-word;
+        }
+
         .answer-section {
             margin-top: 20px;
             padding-top: 20px;
             border-top: 1px solid var(--card-border);
+            word-break: break-word;
+            overflow-wrap: break-word;
         }
 
         .answer-label {
@@ -542,6 +588,8 @@
             color: var(--text-secondary);
             font-size: 0.9rem;
             line-height: 1.7;
+            word-break: break-word;
+            overflow-wrap: break-word;
         }
 
         .question-nav {
@@ -985,15 +1033,26 @@
             border-radius: 8px;
             padding: 8px;
             background: rgba(0, 0, 0, 0.2);
+            word-break: break-word;
+            overflow-wrap: break-word;
         }
 
         .question-select-item {
             display: flex;
-            align-items: center;
+            align-items: flex-start;
             gap: 10px;
             padding: 10px;
             border-bottom: 1px solid var(--card-border);
             cursor: pointer;
+            word-break: break-word;
+            overflow-wrap: break-word;
+        }
+
+        .question-select-item span:last-child {
+            flex: 1;
+            min-width: 0;
+            word-break: break-word;
+            overflow-wrap: break-word;
         }
 
         .question-select-item:last-child {
@@ -1142,6 +1201,13 @@
                     <label style="display: block; margin-bottom: 10px; color: var(--text-secondary);">出题顺序</label>
                     <select class="filter-select" id="examOrder">
                         <option value="sequence">顺序</option>
+                        <option value="random">题目乱序</option>
+                    </select>
+                </div>
+                <div style="margin-bottom: 20px;">
+                    <label style="display: block; margin-bottom: 10px; color: var(--text-secondary);">答案顺序</label>
+                    <select class="filter-select" id="answerOrder">
+                        <option value="sequence">顺序</option>
                         <option value="random">乱序</option>
                     </select>
                 </div>
@@ -1276,6 +1342,7 @@
         let currentExamId = null;
         let currentExamState = null;
         let selectAllState = false;
+        let answerMapping = {};
 
         function init() {
             loadData();
@@ -1284,6 +1351,7 @@
             renderExamList();
             setTimeout(() => {
                 if (!resumeExam()) {
+                    userAnswers = {};
                 }
             }, 500);
         }
@@ -1442,6 +1510,7 @@
                     return true;
                 } else {
                     clearExamState();
+                    userAnswers = {};
                 }
             }
             return false;
@@ -1491,13 +1560,27 @@
             });
 
             document.getElementById('clearDataBtn').addEventListener('click', () => {
-                if (confirm('确定要清空所有试题数据吗？')) {
+                if (confirm('确定要清空所有数据吗？此操作不可恢复！')) {
                     questions = [];
                     progress = { marked: [], completed: [], wrongAnswers: {} };
                     studyHistory = [];
-                    saveData();
+                    exams = [];
+                    examQuestions = [];
+                    userAnswers = {};
+                    currentExamState = null;
+                    answerMapping = {};
+                    
+                    localStorage.removeItem(STORAGE_KEY);
+                    localStorage.removeItem(PROGRESS_KEY);
+                    localStorage.removeItem(HISTORY_KEY);
+                    localStorage.removeItem(EXAMS_KEY);
+                    localStorage.removeItem(EXAM_STATE_KEY);
+                    
+                    renderStudyList();
+                    renderExamList();
+                    renderProgress();
                     document.getElementById('importStats').classList.add('hidden');
-                    showToast('数据已清空', 'success');
+                    showToast('所有数据已清空', 'success');
                 }
             });
 
@@ -1806,6 +1889,7 @@
             const timeLimit = parseInt(document.getElementById('examTime').value) || 30;
             const range = document.getElementById('examRange').value;
             const order = document.getElementById('examOrder').value;
+            const answerOrder = document.getElementById('answerOrder').value;
 
             examTimeLimit = timeLimit * 60;
             examQuestions = questions.filter(q => {
@@ -1824,6 +1908,8 @@
             if (order === 'random') {
                 examQuestions = [...examQuestions].sort(() => Math.random() - 0.5);
             }
+
+            answerMapping = generateAnswerMapping(examQuestions, answerOrder);
 
             userAnswers = {};
             currentStudyIndex = 0;
@@ -1868,6 +1954,32 @@
             const typeClass = { '单选题': 'type-single', '多选题': 'type-multi', '判断题': 'type-judge' };
             const qId = String(q.id);
             const selectedAnswer = userAnswers[qId];
+            const mapping = answerMapping[q.id];
+            
+            let displayOptions;
+            if (mapping && q.type !== '判断题') {
+                displayOptions = Object.keys(q.options).map(displayKey => {
+                    const originalKey = mapping[displayKey] || displayKey;
+                    return { displayKey, originalKey, value: q.options[originalKey] };
+                });
+            } else {
+                displayOptions = Object.entries(q.options).map(([key, val]) => ({ displayKey: key, originalKey: key, value: val }));
+            }
+            
+            const getDisplayAnswer = (ans) => {
+                if (!ans || !mapping) return ans;
+                if (q.type === '判断题') return ans;
+                if (ans.length === 1) {
+                    const mapped = Object.keys(mapping).find(k => mapping[k] === ans);
+                    return mapped || ans;
+                }
+                return ans.split('').map(a => {
+                    const mapped = Object.keys(mapping).find(k => mapping[k] === a);
+                    return mapped || a;
+                }).join('');
+            };
+            
+            const displaySelected = getDisplayAnswer(selectedAnswer);
 
             container.innerHTML = `
                 <div class="question-card">
@@ -1878,21 +1990,21 @@
                     <div class="question-content">${parseMarkdown(q.question)}</div>
                     ${q.type !== '判断题' ? `
                         <ul class="options-list">
-                            ${Object.entries(q.options).map(([key, val]) => `
-                                <li class="option-item ${selectedAnswer && selectedAnswer.includes(key) ? 'selected' : ''}" 
-                                    onclick="selectAnswer('${key}')">
-                                    <span class="option-letter">${key}</span>
-                                    <span>${parseMarkdown(val)}</span>
+                            ${displayOptions.map(opt => `
+                                <li class="option-item ${displaySelected && displaySelected.includes(opt.displayKey) ? 'selected' : ''}" 
+                                    onclick="selectAnswer('${opt.displayKey}')">
+                                    <span class="option-letter">${opt.displayKey}</span>
+                                    <span>${parseMarkdown(opt.value)}</span>
                                 </li>
                             `).join('')}
                         </ul>
                     ` : `
                         <ul class="options-list">
-                            <li class="option-item ${selectedAnswer === '对' ? 'selected' : ''}" onclick="selectAnswer('对')">
+                            <li class="option-item ${displaySelected === '对' ? 'selected' : ''}" onclick="selectAnswer('对')">
                                 <span class="option-letter">✓</span>
                                 <span>对</span>
                             </li>
-                            <li class="option-item ${selectedAnswer === '错' ? 'selected' : ''}" onclick="selectAnswer('错')">
+                            <li class="option-item ${displaySelected === '错' ? 'selected' : ''}" onclick="selectAnswer('错')">
                                 <span class="option-letter">✗</span>
                                 <span>错</span>
                             </li>
@@ -1915,16 +2027,23 @@
         function selectAnswer(answer) {
             const q = examQuestions[currentStudyIndex];
             const qId = String(q.id);
+            const mapping = answerMapping[q.id];
+            
+            let originalAnswer = answer;
+            if (mapping && q.type !== '判断题') {
+                originalAnswer = mapping[answer] || answer;
+            }
+            
             if (q.type === '多选题') {
                 if (!userAnswers[qId]) userAnswers[qId] = '';
                 const current = userAnswers[qId];
-                if (current.includes(answer)) {
-                    userAnswers[qId] = current.replace(answer, '');
+                if (current.includes(originalAnswer)) {
+                    userAnswers[qId] = current.replace(originalAnswer, '');
                 } else {
-                    userAnswers[qId] = (current + answer).split('').sort().join('');
+                    userAnswers[qId] = (current + originalAnswer).split('').sort().join('');
                 }
             } else {
-                userAnswers[qId] = answer;
+                userAnswers[qId] = originalAnswer;
             }
 
             updateProgress();
@@ -2035,7 +2154,9 @@
                 correct,
                 wrong,
                 missed,
-                timeSpent: Math.floor((Date.now() - examStartTime) / 1000)
+                timeSpent: Math.floor((Date.now() - examStartTime) / 1000),
+                wrongQuestionIds: Object.keys(progress.wrongAnswers),
+                wrongAnswers: { ...progress.wrongAnswers }
             };
             studyHistory.unshift(historyEntry);
             if (studyHistory.length > 20) studyHistory.pop();
@@ -2063,6 +2184,47 @@
                     <h2 class="card-title">错题解析</h2>
                     ${wrongQs.map((q, idx) => {
                         const wrongInfo = progress.wrongAnswers[q.id];
+                        const isMulti = q.type === '多选题';
+                        const userAnsStr = Object.keys(q.options).find(k => q.answer.includes(k)) || q.answer;
+                        const correctAnsStr = Object.keys(q.options).find(k => q.answer.includes(k)) || q.answer;
+                        
+                        let optionsHtml = '';
+                        if (q.type === '判断题') {
+                            optionsHtml = `
+                                <ul class="options-list">
+                                    <li class="option-item ${wrongInfo.userAnswer === '对' ? 'wrong' : ''} ${q.answer === '对' ? 'correct' : ''}">
+                                        <span class="option-letter">✓</span>
+                                        <span>对</span>
+                                        ${q.answer === '对' ? '<span class="answer-badge">正确答案</span>' : ''}
+                                        ${wrongInfo.userAnswer === '对' ? '<span class="answer-badge user-ans">你的答案</span>' : ''}
+                                    </li>
+                                    <li class="option-item ${wrongInfo.userAnswer === '错' ? 'wrong' : ''} ${q.answer === '错' ? 'correct' : ''}">
+                                        <span class="option-letter">✗</span>
+                                        <span>错</span>
+                                        ${q.answer === '错' ? '<span class="answer-badge">正确答案</span>' : ''}
+                                        ${wrongInfo.userAnswer === '错' ? '<span class="answer-badge user-ans">你的答案</span>' : ''}
+                                    </li>
+                                </ul>
+                            `;
+                        } else {
+                            optionsHtml = `
+                                <ul class="options-list">
+                                    ${Object.entries(q.options).map(([key, val]) => {
+                                        const isUserAnswer = wrongInfo.userAnswer && wrongInfo.userAnswer.includes(key);
+                                        const isCorrectAnswer = q.answer.includes(key);
+                                        return `
+                                            <li class="option-item ${isUserAnswer ? 'wrong' : ''} ${isCorrectAnswer ? 'correct' : ''}">
+                                                <span class="option-letter">${key}</span>
+                                                <span>${parseMarkdown(val)}</span>
+                                                ${isCorrectAnswer ? '<span class="answer-badge">正确答案</span>' : ''}
+                                                ${isUserAnswer ? '<span class="answer-badge user-ans">你的答案</span>' : ''}
+                                            </li>
+                                        `;
+                                    }).join('')}
+                                </ul>
+                            `;
+                        }
+                        
                         return `
                             <div class="question-card">
                                 <div class="question-header">
@@ -2070,9 +2232,8 @@
                                     <span class="question-id">#${idx + 1}</span>
                                 </div>
                                 <div class="question-content">${parseMarkdown(q.question)}</div>
+                                ${optionsHtml}
                                 <div class="answer-section">
-                                    <div class="answer-label">✗ 你的答案：${parseMarkdown(wrongInfo.userAnswer)}</div>
-                                    <div class="answer-label" style="color: var(--success);">✓ 正确答案：${parseMarkdown(wrongInfo.correctAnswer)}</div>
                                     ${q.analysis ? `
                                         <div class="analysis">
                                             <div class="analysis-title">📝 解析</div>
@@ -2129,12 +2290,12 @@
             if (studyHistory.length === 0) {
                 historyContainer.innerHTML = '<p style="color: var(--text-muted); text-align: center;">暂无学习记录</p>';
             } else {
-                historyContainer.innerHTML = studyHistory.slice(0, 10).map(h => {
+                historyContainer.innerHTML = studyHistory.slice(0, 10).map((h, idx) => {
                     const date = new Date(h.date);
                     const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
                     const timeStr = Math.floor(h.timeSpent / 60) + '分' + (h.timeSpent % 60) + '秒';
                     return `
-                        <div style="padding: 15px; border-bottom: 1px solid var(--card-border); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                        <div style="padding: 15px; border-bottom: 1px solid var(--card-border); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; cursor: pointer;" onclick="viewHistoryWrongQuestions(${idx})">
                             <div>
                                 <span style="color: var(--text-secondary);">${dateStr}</span>
                                 <span style="color: var(--text-muted); margin-left: 15px;">用时: ${timeStr}</span>
@@ -2147,6 +2308,99 @@
                     `;
                 }).join('');
             }
+        }
+
+        function viewHistoryWrongQuestions(historyIndex) {
+            const history = studyHistory[historyIndex];
+            if (!history || !history.wrongQuestionIds || history.wrongQuestionIds.length === 0) {
+                showToast('该次考试没有错题', 'info');
+                return;
+            }
+            
+            const wrongQs = history.wrongQuestionIds.map(id => questions.find(q => q.id == id)).filter(q => q);
+            if (wrongQs.length === 0) {
+                showToast('错题已不存在于题库中', 'error');
+                return;
+            }
+            
+            switchTab('exam');
+            document.getElementById('examConfig').classList.add('hidden');
+            document.getElementById('examContent').classList.add('hidden');
+            document.getElementById('examResult').classList.remove('hidden');
+            
+            const container = document.getElementById('wrongQuestionsArea');
+            const typeClass = { '单选题': 'type-single', '多选题': 'type-multi', '判断题': 'type-judge' };
+            
+            container.innerHTML = `
+                <div class="card" style="margin-top: 20px;">
+                    <h2 class="card-title">历史错题解析 - ${new Date(history.date).toLocaleString()}</h2>
+                    <p style="color: var(--text-muted); margin-bottom: 20px;">得分: ${history.score}% | ${history.correct}对/${history.wrong}错</p>
+                    ${wrongQs.map((q, idx) => {
+                        const userAnsRaw = history.wrongAnswers ? history.wrongAnswers[String(q.id)] : '';
+                        const userAns = userAnsRaw ? (Array.isArray(userAnsRaw) ? userAnsRaw : [userAnsRaw]) : [];
+                        const correctAns = q.answer;
+                        
+                        let optionsHtml = '';
+                        if (q.type === '判断题') {
+                            optionsHtml = `
+                                <ul class="options-list">
+                                    <li class="option-item ${userAns.includes('对') ? 'wrong' : ''} ${correctAns.includes('对') ? 'correct' : ''}">
+                                        <span class="option-letter">✓</span>
+                                        <span>对</span>
+                                        ${correctAns.includes('对') ? '<span class="answer-badge">正确答案</span>' : ''}
+                                        ${userAns.includes('对') ? '<span class="answer-badge user-ans">你的答案</span>' : ''}
+                                    </li>
+                                    <li class="option-item ${userAns.includes('错') ? 'wrong' : ''} ${correctAns.includes('错') ? 'correct' : ''}">
+                                        <span class="option-letter">✗</span>
+                                        <span>错</span>
+                                        ${correctAns.includes('错') ? '<span class="answer-badge">正确答案</span>' : ''}
+                                        ${userAns.includes('错') ? '<span class="answer-badge user-ans">你的答案</span>' : ''}
+                                    </li>
+                                </ul>
+                            `;
+                        } else {
+                            optionsHtml = `
+                                <ul class="options-list">
+                                    ${Object.entries(q.options).map(([key, val]) => {
+                                        const isUserAnswer = userAns && userAns.includes(key);
+                                        const isCorrectAnswer = correctAns.includes(key);
+                                        return `
+                                            <li class="option-item ${isUserAnswer ? 'wrong' : ''} ${isCorrectAnswer ? 'correct' : ''}">
+                                                <span class="option-letter">${key}</span>
+                                                <span>${parseMarkdown(val)}</span>
+                                                ${isCorrectAnswer ? '<span class="answer-badge">正确答案</span>' : ''}
+                                                ${isUserAnswer ? '<span class="answer-badge user-ans">你的答案</span>' : ''}
+                                            </li>
+                                        `;
+                                    }).join('')}
+                                </ul>
+                            `;
+                        }
+                        
+                        return `
+                            <div class="question-card">
+                                <div class="question-header">
+                                    <span class="question-type ${typeClass[q.type]}">${q.type}</span>
+                                    <span class="question-id">#${idx + 1}</span>
+                                </div>
+                                <div class="question-content">${parseMarkdown(q.question)}</div>
+                                ${optionsHtml}
+                                ${q.analysis ? `
+                                    <div class="answer-section">
+                                        <div class="analysis">
+                                            <div class="analysis-title">📝 解析</div>
+                                            <div class="analysis-content">${parseMarkdown(q.analysis)}</div>
+                                        </div>
+                                    </div>
+                                ` : ''}
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            `;
+            
+            container.scrollIntoView({ behavior: 'smooth' });
+            showToast('查看历史错题', 'success');
         }
 
         function showProgress(text) {
@@ -2163,6 +2417,37 @@
             toast.textContent = message;
             toast.className = 'toast ' + type + ' show';
             setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+
+        function generateAnswerMapping(examQuestions, order) {
+            const mapping = {};
+            if (order === 'sequence') {
+                return mapping;
+            }
+            examQuestions.forEach(q => {
+                if (q.type === '判断题') {
+                    mapping[q.id] = { '对': '对', '错': '错' };
+                    return;
+                }
+                const keys = Object.keys(q.options);
+                const shuffledKeys = [...keys].sort(() => Math.random() - 0.5);
+                const reverseMap = {};
+                keys.forEach((originalKey, idx) => {
+                    reverseMap[shuffledKeys[idx]] = originalKey;
+                });
+                mapping[q.id] = reverseMap;
+            });
+            return mapping;
+        }
+
+        function mapUserAnswer(qId, userAnswer) {
+            if (!userAnswer) return '';
+            const mapping = answerMapping[qId];
+            if (!mapping) return userAnswer;
+            if (userAnswer.length === 1) {
+                return mapping[userAnswer] || userAnswer;
+            }
+            return userAnswer.split('').map(key => mapping[key] || key).join('');
         }
 
         function parseMarkdown(text) {
@@ -2368,6 +2653,7 @@
             currentStudyIndex = 0;
             examStartTime = Date.now();
             examTimeLimit = exam.duration * 60;
+            answerMapping = generateAnswerMapping(examQuestions, 'random');
 
             document.getElementById('examConfig').classList.add('hidden');
             document.getElementById('examContent').classList.remove('hidden');
