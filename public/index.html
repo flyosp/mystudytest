@@ -404,6 +404,29 @@
         .type-multi { background: rgba(168, 85, 247, 0.2); color: #c084fc; }
         .type-judge { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
 
+        .question-difficulty {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.7rem;
+            font-weight: 500;
+            margin-left: 8px;
+        }
+        .diff-1 { background: rgba(74, 222, 128, 0.2); color: #4ade80; }
+        .diff-2 { background: rgba(251, 191, 36, 0.2); color: #fbbf24; }
+        .diff-3 { background: rgba(248, 113, 113, 0.2); color: #f87171; }
+
+        .question-category {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.7rem;
+            font-weight: 500;
+            margin-left: 8px;
+            background: rgba(99, 102, 241, 0.2);
+            color: #818cf8;
+        }
+
         .question-header .question-id, .question-id {
             font-size: 0.75rem;
             color: var(--text-muted);
@@ -1138,12 +1161,14 @@
                     <p class="import-hint">支持 .xlsx 和 .xls 格式</p>
                 </div>
                 <div class="format-info">
-                    <h4>📋 Excel格式要求</h4>
+                    <h4>📋 Excel格式要求（支持两种格式，自动识别）</h4>
                     <ul>
-                        <li>必须包含列：题型、题干、选项A、选项B、选项C、选项D、正确答案、解析</li>
-                        <li>单选题：正确答案填写单个字母（如A、B）</li>
+                        <li><strong>格式一（8列）：</strong>题型、题干、选项A-D、正确答案、解析</li>
+                        <li><strong>格式二（11列）：</strong>题型、题目分类、题干、选项A-F、正确答案、难度</li>
+                        <li>单选题：正确答案填写A-F单个字母</li>
                         <li>多选题：正确答案填写字母组合（如AB、ACD）</li>
                         <li>判断题：正确答案填写"对"或"错"</li>
+                        <li>难度可选值：简单/中等/困难（或1/2/3）</li>
                     </ul>
                 </div>
             </div>
@@ -1171,6 +1196,15 @@
                         <option value="单选题">单选题</option>
                         <option value="多选题">多选题</option>
                         <option value="判断题">判断题</option>
+                    </select>
+                    <select class="filter-select" id="studyDifficultyFilter">
+                        <option value="">全部难度</option>
+                        <option value="1">简单</option>
+                        <option value="2">中等</option>
+                        <option value="3">困难</option>
+                    </select>
+                    <select class="filter-select" id="studyCategoryFilter">
+                        <option value="">全部分类</option>
                     </select>
                     <select class="filter-select" id="studyMarkFilter">
                         <option value="">全部</option>
@@ -1547,6 +1581,8 @@
 
             document.getElementById('studySearch').addEventListener('input', debounce(renderStudyList, 300));
             document.getElementById('studyTypeFilter').addEventListener('change', renderStudyList);
+            document.getElementById('studyDifficultyFilter').addEventListener('change', renderStudyList);
+            document.getElementById('studyCategoryFilter').addEventListener('change', renderStudyList);
             document.getElementById('studyMarkFilter').addEventListener('change', renderStudyList);
 
             document.getElementById('startExamBtn').addEventListener('click', startExam);
@@ -1646,20 +1682,37 @@
             }
 
             const headers = data[0].map(h => h ? String(h).trim() : '');
-            const requiredHeaders = ['题型', '题干', '选项A', '选项B', '选项C', '选项D', '正确答案', '解析'];
-            const headerValid = requiredHeaders.every(h => headers.includes(h));
-
-            if (!headerValid) {
-                hideProgress();
-                showToast('Excel表头缺少必要的列，请检查格式', 'error');
-                return;
-            }
-
             const headerMap = {};
             headers.forEach((h, i) => { headerMap[h] = i; });
 
+            const hasNewFormat = headers.includes('题目分类') || headers.includes('难度');
+            
+            let requiredHeaders;
+            if (hasNewFormat) {
+                requiredHeaders = ['题型', '题干', '正确答案'];
+                if (headerMap['题型'] === undefined || headerMap['题干'] === undefined || headerMap['正确答案'] === undefined) {
+                    hideProgress();
+                    showToast('Excel表头缺少必要的列（题型、题干、正确答案）', 'error');
+                    return;
+                }
+            } else {
+                requiredHeaders = ['题型', '题干', '选项A', '选项B', '选项C', '选项D', '正确答案', '解析'];
+                const headerValid = requiredHeaders.every(h => headers.includes(h));
+                if (!headerValid) {
+                    hideProgress();
+                    showToast('Excel表头缺少必要的列，请检查格式', 'error');
+                    return;
+                }
+            }
+
             const newQuestions = [];
             const errors = [];
+
+            const difficultyMap = {
+                '简单': 1, '容易': 1, '1': 1,
+                '中等': 2, '普通': 2, '2': 2,
+                '困难': 3, '难': 3, '较难': 3, '3': 3
+            };
 
             for (let i = 1; i < data.length; i++) {
                 const row = data[i];
@@ -1667,12 +1720,31 @@
 
                 const type = String(row[headerMap['题型']] || '').trim();
                 const questionText = String(row[headerMap['题干']] || '').trim();
-                const optionA = String(row[headerMap['选项A']] || '').trim();
-                const optionB = String(row[headerMap['选项B']] || '').trim();
-                const optionC = String(row[headerMap['选项C']] || '').trim();
-                const optionD = String(row[headerMap['选项D']] || '').trim();
                 const correctAnswer = String(row[headerMap['正确答案']] || '').trim();
-                const analysis = String(row[headerMap['解析']] || '').trim();
+
+                let category = '';
+                let difficulty = 2;
+                let optionA = '', optionB = '', optionC = '', optionD = '', optionE = '', optionF = '';
+                let analysis = '暂无解析';
+
+                if (hasNewFormat) {
+                    category = String(row[headerMap['题目分类']] || '').trim();
+                    const difficultyStr = String(row[headerMap['难度']] || '').trim();
+                    difficulty = difficultyMap[difficultyStr] || 2;
+                    
+                    if (headerMap['选项A'] !== undefined) optionA = String(row[headerMap['选项A']] || '').trim();
+                    if (headerMap['选项B'] !== undefined) optionB = String(row[headerMap['选项B']] || '').trim();
+                    if (headerMap['选项C'] !== undefined) optionC = String(row[headerMap['选项C']] || '').trim();
+                    if (headerMap['选项D'] !== undefined) optionD = String(row[headerMap['选项D']] || '').trim();
+                    if (headerMap['选项E'] !== undefined) optionE = String(row[headerMap['选项E']] || '').trim();
+                    if (headerMap['选项F'] !== undefined) optionF = String(row[headerMap['选项F']] || '').trim();
+                } else {
+                    optionA = String(row[headerMap['选项A']] || '').trim();
+                    optionB = String(row[headerMap['选项B']] || '').trim();
+                    optionC = String(row[headerMap['选项C']] || '').trim();
+                    optionD = String(row[headerMap['选项D']] || '').trim();
+                    analysis = String(row[headerMap['解析']] || '').trim();
+                }
 
                 let valid = true;
                 let errorMsg = '';
@@ -1686,13 +1758,13 @@
                         errorMsg = `第${i + 1}行：判断题答案应为"对"或"错"`;
                     }
                 } else if (type === '单选题') {
-                    if (!['A', 'B', 'C', 'D'].includes(correctAnswer.toUpperCase())) {
+                    if (!['A', 'B', 'C', 'D', 'E', 'F'].includes(correctAnswer.toUpperCase())) {
                         valid = false;
-                        errorMsg = `第${i + 1}行：单选题答案应为A、B、C或D`;
+                        errorMsg = `第${i + 1}行：单选题答案应为A-F`;
                     }
                 } else if (type === '多选题') {
                     const upperAnswer = correctAnswer.toUpperCase();
-                    if (!/^[ABCD]{2,}$/.test(upperAnswer)) {
+                    if (!/^[ABCDEF]{2,}$/.test(upperAnswer)) {
                         valid = false;
                         errorMsg = `第${i + 1}行：多选题答案应为字母组合`;
                     }
@@ -1709,6 +1781,8 @@
                     if (optionB) questionOptions.B = optionB;
                     if (optionC) questionOptions.C = optionC;
                     if (optionD) questionOptions.D = optionD;
+                    if (optionE) questionOptions.E = optionE;
+                    if (optionF) questionOptions.F = optionF;
                 }
 
                 const normalizedAnswer = type === '判断题' 
@@ -1718,6 +1792,8 @@
                 newQuestions.push({
                     id: Date.now() + Math.random(),
                     type,
+                    category: category || '',
+                    difficulty,
                     question: questionText,
                     options: questionOptions,
                     answer: normalizedAnswer,
@@ -1736,7 +1812,7 @@
                 questions = [...questions, ...newQuestions];
                 saveData();
                 showImportStats();
-                showToast(`成功导入 ${newQuestions.length} 道试题`, 'success');
+                showToast(`成功导入 ${newQuestions.length} 道试题（${hasNewFormat ? '新格式' : '旧格式'}）`, 'success');
             } else {
                 showToast('没有有效的试题数据', 'error');
             }
@@ -1775,15 +1851,28 @@
             const container = document.getElementById('studyContent');
             const searchTerm = document.getElementById('studySearch').value.toLowerCase();
             const typeFilter = document.getElementById('studyTypeFilter').value;
+            const difficultyFilter = document.getElementById('studyDifficultyFilter').value;
+            const categoryFilter = document.getElementById('studyCategoryFilter').value;
             const markFilter = document.getElementById('studyMarkFilter').value;
+
+            const categories = [...new Set(questions.map(q => q.category).filter(c => c))];
+            const categorySelect = document.getElementById('studyCategoryFilter');
+            const currentCategory = categorySelect.value;
+            categorySelect.innerHTML = '<option value="">全部分类</option>' + 
+                categories.map(c => `<option value="${c}">${c}</option>`).join('');
+            if (categories.includes(currentCategory)) {
+                categorySelect.value = currentCategory;
+            }
 
             let filtered = questions.filter(q => {
                 const matchSearch = q.question.toLowerCase().includes(searchTerm) ||
                     q.analysis.toLowerCase().includes(searchTerm);
                 const matchType = !typeFilter || q.type === typeFilter;
+                const matchDifficulty = !difficultyFilter || (q.difficulty || 2) === parseInt(difficultyFilter);
+                const matchCategory = !categoryFilter || q.category === categoryFilter;
                 const matchMark = !markFilter || 
                     (markFilter === 'marked' && progress.marked.includes(q.id));
-                return matchSearch && matchType && matchMark;
+                return matchSearch && matchType && matchDifficulty && matchCategory && matchMark;
             });
 
             if (filtered.length === 0) {
@@ -1798,11 +1887,14 @@
             }
 
             const typeClass = { '单选题': 'type-single', '多选题': 'type-multi', '判断题': 'type-judge' };
+            const difficultyText = { 1: '简单', 2: '中等', 3: '困难' };
 
             container.innerHTML = filtered.map((q, idx) => `
                 <div class="question-card ${progress.marked.includes(q.id) ? 'marked' : ''}" data-id="${q.id}">
                     <div class="question-header">
                         <span class="question-type ${typeClass[q.type]}">${q.type}</span>
+                        ${q.difficulty ? `<span class="question-difficulty diff-${q.difficulty}">${difficultyText[q.difficulty] || '中等'}</span>` : ''}
+                        ${q.category ? `<span class="question-category">${q.category}</span>` : ''}
                         <span class="question-id">#${idx + 1}</span>
                     </div>
                     <div class="question-content">${parseMarkdown(q.question)}</div>
@@ -1980,11 +2072,14 @@
             };
             
             const displaySelected = getDisplayAnswer(selectedAnswer);
+            const difficultyText = { 1: '简单', 2: '中等', 3: '困难' };
 
             container.innerHTML = `
                 <div class="question-card">
                     <div class="question-header">
                         <span class="question-type ${typeClass[q.type]}">${q.type}</span>
+                        ${q.difficulty ? `<span class="question-difficulty diff-${q.difficulty}">${difficultyText[q.difficulty] || '中等'}</span>` : ''}
+                        ${q.category ? `<span class="question-category">${q.category}</span>` : ''}
                         <span class="question-id">${currentStudyIndex + 1} / ${examQuestions.length}</span>
                     </div>
                     <div class="question-content">${parseMarkdown(q.question)}</div>
@@ -2178,6 +2273,7 @@
 
             const container = document.getElementById('wrongQuestionsArea');
             const typeClass = { '单选题': 'type-single', '多选题': 'type-multi', '判断题': 'type-judge' };
+            const difficultyText = { 1: '简单', 2: '中等', 3: '困难' };
 
             container.innerHTML = `
                 <div class="card">
@@ -2229,6 +2325,8 @@
                             <div class="question-card">
                                 <div class="question-header">
                                     <span class="question-type ${typeClass[q.type]}">${q.type}</span>
+                                    ${q.difficulty ? `<span class="question-difficulty diff-${q.difficulty}">${difficultyText[q.difficulty] || '中等'}</span>` : ''}
+                                    ${q.category ? `<span class="question-category">${q.category}</span>` : ''}
                                     <span class="question-id">#${idx + 1}</span>
                                 </div>
                                 <div class="question-content">${parseMarkdown(q.question)}</div>
@@ -2330,6 +2428,7 @@
             
             const container = document.getElementById('wrongQuestionsArea');
             const typeClass = { '单选题': 'type-single', '多选题': 'type-multi', '判断题': 'type-judge' };
+            const difficultyText = { 1: '简单', 2: '中等', 3: '困难' };
             
             container.innerHTML = `
                 <div class="card" style="margin-top: 20px;">
@@ -2381,6 +2480,8 @@
                             <div class="question-card">
                                 <div class="question-header">
                                     <span class="question-type ${typeClass[q.type]}">${q.type}</span>
+                                    ${q.difficulty ? `<span class="question-difficulty diff-${q.difficulty}">${difficultyText[q.difficulty] || '中等'}</span>` : ''}
+                                    ${q.category ? `<span class="question-category">${q.category}</span>` : ''}
                                     <span class="question-id">#${idx + 1}</span>
                                 </div>
                                 <div class="question-content">${parseMarkdown(q.question)}</div>
