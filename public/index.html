@@ -1362,10 +1362,13 @@
         const HISTORY_KEY = 'questionBank_history';
         const EXAMS_KEY = 'questionBank_exams';
         const EXAM_STATE_KEY = 'questionBank_examState';
+        const DATA_VERSION_KEY = 'questionBank_dataVersion';
+        const CURRENT_DATA_VERSION = '2';
+        const OPTION_KEYS = ['A', 'B', 'C', 'D', 'E', 'F'];
 
         let questions = [];
         let exams = [];
-        let progress = { marked: [], completed: [], wrongAnswers: {} };
+        let progress = createEmptyProgress();
         let studyHistory = [];
         let currentStudyIndex = 0;
         let examQuestions = [];
@@ -1377,6 +1380,250 @@
         let currentExamState = null;
         let selectAllState = false;
         let answerMapping = {};
+        let currentAnswerOrder = 'sequence';
+
+        function createEmptyProgress() {
+            return { marked: [], completed: [], wrongAnswers: {} };
+        }
+
+        function resetAppState() {
+            clearInterval(examTimer);
+            questions = [];
+            exams = [];
+            progress = createEmptyProgress();
+            studyHistory = [];
+            currentStudyIndex = 0;
+            examQuestions = [];
+            userAnswers = {};
+            examTimer = null;
+            examStartTime = null;
+            examTimeLimit = 30 * 60;
+            currentExamId = null;
+            currentExamState = null;
+            answerMapping = {};
+            currentAnswerOrder = 'sequence';
+        }
+
+        function clearStoredData() {
+            localStorage.removeItem(STORAGE_KEY);
+            localStorage.removeItem(PROGRESS_KEY);
+            localStorage.removeItem(HISTORY_KEY);
+            localStorage.removeItem(EXAMS_KEY);
+            localStorage.removeItem(EXAM_STATE_KEY);
+            localStorage.setItem(DATA_VERSION_KEY, CURRENT_DATA_VERSION);
+        }
+
+        function ensureDataVersion() {
+            const savedVersion = localStorage.getItem(DATA_VERSION_KEY);
+            if (savedVersion === CURRENT_DATA_VERSION) {
+                return;
+            }
+
+            const hasLegacyData = [STORAGE_KEY, PROGRESS_KEY, HISTORY_KEY, EXAMS_KEY, EXAM_STATE_KEY]
+                .some(key => localStorage.getItem(key) !== null);
+
+            resetAppState();
+            clearStoredData();
+
+            if (hasLegacyData) {
+                setTimeout(() => {
+                    showToast('检测到旧版本本地数据，已自动清空，请重新导入题库。', 'warning');
+                }, 0);
+            }
+        }
+
+        function safeParseJSON(value, fallback) {
+            if (!value) return fallback;
+            try {
+                return JSON.parse(value);
+            } catch (err) {
+                console.warn('JSON 解析失败:', err);
+                return fallback;
+            }
+        }
+
+        function toCellString(value) {
+            if (value === null || value === undefined) {
+                return '';
+            }
+            return String(value).trim();
+        }
+
+        function getCellString(row, index) {
+            if (!Array.isArray(row) || index === undefined) {
+                return '';
+            }
+            return toCellString(row[index]);
+        }
+
+        function getSheetCellString(cell) {
+            if (!cell) {
+                return '';
+            }
+            if (cell.w !== undefined && cell.w !== null && String(cell.w).trim() !== '') {
+                return String(cell.w).trim();
+            }
+            if (cell.v !== undefined && cell.v !== null) {
+                return String(cell.v).trim();
+            }
+            if (cell.f) {
+                return `=${String(cell.f).trim()}`;
+            }
+            return '';
+        }
+
+        function readSheetAsStringRows(sheet) {
+            if (!sheet || !sheet['!ref']) {
+                return [];
+            }
+
+            const range = XLSX.utils.decode_range(sheet['!ref']);
+            const rows = [];
+
+            for (let rowIndex = range.s.r; rowIndex <= range.e.r; rowIndex++) {
+                const row = [];
+                let hasValue = false;
+
+                for (let colIndex = range.s.c; colIndex <= range.e.c; colIndex++) {
+                    const cellAddress = XLSX.utils.encode_cell({ r: rowIndex, c: colIndex });
+                    const value = getSheetCellString(sheet[cellAddress]);
+                    if (value !== '') {
+                        hasValue = true;
+                    }
+                    row.push(value);
+                }
+
+                if (hasValue) {
+                    rows.push(row);
+                }
+            }
+
+            return rows;
+        }
+
+        function normalizeQuestionType(value) {
+            const normalized = toCellString(value).replace(/\s+/g, '');
+            if (['单选题', '单选', '单项选择题'].includes(normalized)) return '单选题';
+            if (['多选题', '多选', '多项选择题'].includes(normalized)) return '多选题';
+            if (['判断题', '判断'].includes(normalized)) return '判断题';
+            return '';
+        }
+
+        function normalizeDifficulty(value) {
+            const normalized = toCellString(value);
+            const difficultyMap = {
+                '简单': 1,
+                '容易': 1,
+                '1': 1,
+                '中等': 2,
+                '普通': 2,
+                '2': 2,
+                '困难': 3,
+                '难': 3,
+                '较难': 3,
+                '3': 3
+            };
+            return difficultyMap[normalized] || 2;
+        }
+
+        function normalizeChoiceAnswer(value, isMulti) {
+            const rawValue = toCellString(value).toUpperCase();
+            if (!rawValue || !/^[A-F\s,，、;；/\\|]+$/.test(rawValue)) {
+                return '';
+            }
+
+            const cleaned = rawValue.replace(/[^A-F]/g, '');
+            if (!cleaned) {
+                return '';
+            }
+
+            const uniqueLetters = [...new Set(cleaned.split(''))];
+            if (!isMulti) {
+                return uniqueLetters.length === 1 ? uniqueLetters[0] : '';
+            }
+
+            return uniqueLetters.sort().join('');
+        }
+
+        function normalizeJudgeAnswer(value) {
+            const normalized = toCellString(value).replace(/\s+/g, '').toUpperCase();
+            if (['对', '正确', 'T', 'TRUE', '√'].includes(normalized)) return '对';
+            if (['错', '错误', 'F', 'FALSE', '×'].includes(normalized)) return '错';
+            return '';
+        }
+
+        function buildQuestionOptions(row, headerMap) {
+            const questionOptions = {};
+            OPTION_KEYS.forEach(key => {
+                const value = getCellString(row, headerMap[`选项${key}`]);
+                if (value !== '') {
+                    questionOptions[key] = value;
+                }
+            });
+            return questionOptions;
+        }
+
+        function normalizeComparableText(value) {
+            return toCellString(value).replace(/\s+/g, ' ').trim().toLowerCase();
+        }
+
+        function normalizeWrongAnswerMap(value) {
+            if (!value || typeof value !== 'object') {
+                return {};
+            }
+
+            const normalized = {};
+            Object.entries(value).forEach(([questionId, info]) => {
+                if (!info) return;
+
+                if (typeof info === 'string') {
+                    normalized[String(questionId)] = {
+                        userAnswer: info,
+                        correctAnswer: ''
+                    };
+                    return;
+                }
+
+                if (typeof info === 'object') {
+                    normalized[String(questionId)] = {
+                        userAnswer: toCellString(info.userAnswer),
+                        correctAnswer: toCellString(info.correctAnswer)
+                    };
+                }
+            });
+
+            return normalized;
+        }
+
+        function normalizeProgress(value) {
+            const parsed = value && typeof value === 'object' ? value : {};
+            return {
+                marked: Array.isArray(parsed.marked) ? parsed.marked : [],
+                completed: Array.isArray(parsed.completed) ? parsed.completed : [],
+                wrongAnswers: normalizeWrongAnswerMap(parsed.wrongAnswers)
+            };
+        }
+
+        function normalizeHistoryEntries(entries) {
+            if (!Array.isArray(entries)) {
+                return [];
+            }
+
+            return entries
+                .filter(entry => entry && typeof entry === 'object')
+                .map(entry => ({
+                    ...entry,
+                    score: Number(entry.score) || 0,
+                    correct: Number(entry.correct) || 0,
+                    wrong: Number(entry.wrong) || 0,
+                    missed: Number(entry.missed) || 0,
+                    timeSpent: Number(entry.timeSpent) || 0,
+                    wrongQuestionIds: Array.isArray(entry.wrongQuestionIds)
+                        ? entry.wrongQuestionIds.map(id => String(id))
+                        : [],
+                    wrongAnswers: normalizeWrongAnswerMap(entry.wrongAnswers)
+                }));
+        }
 
         function init() {
             loadData();
@@ -1391,33 +1638,33 @@
         }
 
         function loadData() {
-            const savedQuestions = localStorage.getItem(STORAGE_KEY);
-            const savedProgress = localStorage.getItem(PROGRESS_KEY);
-            const savedHistory = localStorage.getItem(HISTORY_KEY);
-            const savedExams = localStorage.getItem(EXAMS_KEY);
-            const savedExamState = localStorage.getItem(EXAM_STATE_KEY);
+            ensureDataVersion();
 
-            if (savedQuestions) {
-                questions = JSON.parse(savedQuestions);
+            const savedQuestions = safeParseJSON(localStorage.getItem(STORAGE_KEY), []);
+            const savedProgress = safeParseJSON(localStorage.getItem(PROGRESS_KEY), createEmptyProgress());
+            const savedHistory = safeParseJSON(localStorage.getItem(HISTORY_KEY), []);
+            const savedExams = safeParseJSON(localStorage.getItem(EXAMS_KEY), []);
+            const savedExamState = safeParseJSON(localStorage.getItem(EXAM_STATE_KEY), null);
+
+            if (Array.isArray(savedQuestions)) {
+                questions = savedQuestions;
+            }
+            if (questions.length > 0) {
                 showImportStats();
             }
-            if (savedProgress) {
-                progress = JSON.parse(savedProgress);
-            }
-            if (savedHistory) {
-                studyHistory = JSON.parse(savedHistory);
-            }
-            if (savedExams) {
-                exams = JSON.parse(savedExams);
-            }
+            progress = normalizeProgress(savedProgress);
+            studyHistory = normalizeHistoryEntries(savedHistory);
+            exams = Array.isArray(savedExams) ? savedExams : [];
             if (savedExamState) {
-                currentExamState = JSON.parse(savedExamState);
-                if (currentExamState && currentExamState.examQuestions) {
+                currentExamState = savedExamState;
+                if (currentExamState && Array.isArray(currentExamState.examQuestions)) {
                     examQuestions = currentExamState.examQuestions;
                     userAnswers = currentExamState.userAnswers || {};
                     currentStudyIndex = currentExamState.currentStudyIndex || 0;
                     examTimeLimit = currentExamState.examTimeLimit || 30 * 60;
                     currentExamId = currentExamState.currentExamId || null;
+                    answerMapping = currentExamState.answerMapping || {};
+                    currentAnswerOrder = currentExamState.answerOrder || 'sequence';
                     if (currentExamState.examStartTime) {
                         examStartTime = currentExamState.examStartTime;
                     }
@@ -1426,6 +1673,7 @@
         }
 
         function saveData() {
+            localStorage.setItem(DATA_VERSION_KEY, CURRENT_DATA_VERSION);
             localStorage.setItem(STORAGE_KEY, JSON.stringify(questions));
             localStorage.setItem(PROGRESS_KEY, JSON.stringify(progress));
             localStorage.setItem(HISTORY_KEY, JSON.stringify(studyHistory));
@@ -1439,7 +1687,7 @@
             }
 
             const exportData = {
-                version: '1.0',
+                version: CURRENT_DATA_VERSION,
                 exportTime: new Date().toISOString(),
                 questions: questions,
                 exams: exams,
@@ -1480,10 +1728,10 @@
                         return;
                     }
 
-                    questions = data.questions || [];
-                    exams = data.exams || [];
-                    progress = data.progress || { marked: [], completed: [], wrongAnswers: {} };
-                    studyHistory = data.studyHistory || [];
+                    questions = Array.isArray(data.questions) ? data.questions : [];
+                    exams = Array.isArray(data.exams) ? data.exams : [];
+                    progress = normalizeProgress(data.progress);
+                    studyHistory = normalizeHistoryEntries(data.studyHistory);
 
                     saveData();
                     showImportStats();
@@ -1508,6 +1756,8 @@
                     examTimeLimit: examTimeLimit,
                     examStartTime: examStartTime,
                     currentExamId: currentExamId,
+                    answerMapping: answerMapping,
+                    answerOrder: currentAnswerOrder,
                     savedAt: new Date().toISOString()
                 };
                 localStorage.setItem(EXAM_STATE_KEY, JSON.stringify(currentExamState));
@@ -1516,6 +1766,8 @@
 
         function clearExamState() {
             currentExamState = null;
+            answerMapping = {};
+            currentAnswerOrder = 'sequence';
             localStorage.removeItem(EXAM_STATE_KEY);
         }
 
@@ -1528,6 +1780,8 @@
                     examTimeLimit = currentExamState.examTimeLimit || 30 * 60;
                     examStartTime = currentExamState.examStartTime;
                     currentExamId = currentExamState.currentExamId || null;
+                    answerMapping = currentExamState.answerMapping || {};
+                    currentAnswerOrder = currentExamState.answerOrder || 'sequence';
 
                     document.getElementById('examConfig').classList.add('hidden');
                     document.getElementById('examContent').classList.remove('hidden');
@@ -1597,20 +1851,8 @@
 
             document.getElementById('clearDataBtn').addEventListener('click', () => {
                 if (confirm('确定要清空所有数据吗？此操作不可恢复！')) {
-                    questions = [];
-                    progress = { marked: [], completed: [], wrongAnswers: {} };
-                    studyHistory = [];
-                    exams = [];
-                    examQuestions = [];
-                    userAnswers = {};
-                    currentExamState = null;
-                    answerMapping = {};
-                    
-                    localStorage.removeItem(STORAGE_KEY);
-                    localStorage.removeItem(PROGRESS_KEY);
-                    localStorage.removeItem(HISTORY_KEY);
-                    localStorage.removeItem(EXAMS_KEY);
-                    localStorage.removeItem(EXAM_STATE_KEY);
+                    resetAppState();
+                    clearStoredData();
                     
                     renderStudyList();
                     renderExamList();
@@ -1663,7 +1905,7 @@
                     const data = new Uint8Array(e.target.result);
                     const workbook = XLSX.read(data, { type: 'array' });
                     const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-                    const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
+                    const jsonData = readSheetAsStringRows(firstSheet);
 
                     importQuestions(jsonData);
                 } catch (err) {
@@ -1681,123 +1923,91 @@
                 return;
             }
 
-            const headers = data[0].map(h => h ? String(h).trim() : '');
+            const headers = data[0].map(toCellString);
             const headerMap = {};
-            headers.forEach((h, i) => { headerMap[h] = i; });
+            headers.forEach((h, i) => {
+                if (h) {
+                    headerMap[h] = i;
+                }
+            });
 
             const hasNewFormat = headers.includes('题目分类') || headers.includes('难度');
-            
-            let requiredHeaders;
-            if (hasNewFormat) {
-                requiredHeaders = ['题型', '题干', '正确答案'];
-                if (headerMap['题型'] === undefined || headerMap['题干'] === undefined || headerMap['正确答案'] === undefined) {
-                    hideProgress();
-                    showToast('Excel表头缺少必要的列（题型、题干、正确答案）', 'error');
-                    return;
-                }
-            } else {
-                requiredHeaders = ['题型', '题干', '选项A', '选项B', '选项C', '选项D', '正确答案', '解析'];
-                const headerValid = requiredHeaders.every(h => headers.includes(h));
-                if (!headerValid) {
-                    hideProgress();
-                    showToast('Excel表头缺少必要的列，请检查格式', 'error');
-                    return;
-                }
+            const requiredHeaders = hasNewFormat
+                ? ['题型', '题干', '正确答案']
+                : ['题型', '题干', '选项A', '选项B', '选项C', '选项D', '正确答案', '解析'];
+            const missingHeaders = requiredHeaders.filter(header => headerMap[header] === undefined);
+            if (missingHeaders.length > 0) {
+                hideProgress();
+                showToast(`Excel表头缺少必要的列：${missingHeaders.join('、')}`, 'error');
+                return;
             }
 
             const newQuestions = [];
             const errors = [];
 
-            const difficultyMap = {
-                '简单': 1, '容易': 1, '1': 1,
-                '中等': 2, '普通': 2, '2': 2,
-                '困难': 3, '难': 3, '较难': 3, '3': 3
-            };
-
             for (let i = 1; i < data.length; i++) {
                 const row = data[i];
-                if (!row[headerMap['题干']]) continue;
+                const questionText = getCellString(row, headerMap['题干']);
+                if (!questionText) continue;
 
-                const type = String(row[headerMap['题型']] || '').trim();
-                const questionText = String(row[headerMap['题干']] || '').trim();
-                const correctAnswer = String(row[headerMap['正确答案']] || '').trim();
+                const type = normalizeQuestionType(getCellString(row, headerMap['题型']));
+                const category = getCellString(row, headerMap['题目分类']);
+                const difficulty = normalizeDifficulty(getCellString(row, headerMap['难度']));
+                const analysis = getCellString(row, headerMap['解析']) || '暂无解析';
+                const correctAnswer = getCellString(row, headerMap['正确答案']);
+                const questionOptions = buildQuestionOptions(row, headerMap);
+                const optionKeys = Object.keys(questionOptions);
 
-                let category = '';
-                let difficulty = 2;
-                let optionA = '', optionB = '', optionC = '', optionD = '', optionE = '', optionF = '';
-                let analysis = '暂无解析';
-
-                if (hasNewFormat) {
-                    category = String(row[headerMap['题目分类']] || '').trim();
-                    const difficultyStr = String(row[headerMap['难度']] || '').trim();
-                    difficulty = difficultyMap[difficultyStr] || 2;
-                    
-                    if (headerMap['选项A'] !== undefined) optionA = String(row[headerMap['选项A']] || '').trim();
-                    if (headerMap['选项B'] !== undefined) optionB = String(row[headerMap['选项B']] || '').trim();
-                    if (headerMap['选项C'] !== undefined) optionC = String(row[headerMap['选项C']] || '').trim();
-                    if (headerMap['选项D'] !== undefined) optionD = String(row[headerMap['选项D']] || '').trim();
-                    if (headerMap['选项E'] !== undefined) optionE = String(row[headerMap['选项E']] || '').trim();
-                    if (headerMap['选项F'] !== undefined) optionF = String(row[headerMap['选项F']] || '').trim();
-                } else {
-                    optionA = String(row[headerMap['选项A']] || '').trim();
-                    optionB = String(row[headerMap['选项B']] || '').trim();
-                    optionC = String(row[headerMap['选项C']] || '').trim();
-                    optionD = String(row[headerMap['选项D']] || '').trim();
-                    analysis = String(row[headerMap['解析']] || '').trim();
-                }
-
-                let valid = true;
+                let normalizedAnswer = '';
                 let errorMsg = '';
 
-                if (!['单选题', '多选题', '判断题'].includes(type)) {
-                    valid = false;
-                    errorMsg = `第${i + 1}行：题型错误`;
+                if (!type) {
+                    errorMsg = `第${i + 1}行：题型错误，仅支持单选题、多选题、判断题`;
                 } else if (type === '判断题') {
-                    if (!['对', '错', '正确', '错误'].includes(correctAnswer)) {
-                        valid = false;
-                        errorMsg = `第${i + 1}行：判断题答案应为"对"或"错"`;
+                    if (optionKeys.length > 0) {
+                        errorMsg = `第${i + 1}行：判断题不应包含选项列`;
+                    } else {
+                        normalizedAnswer = normalizeJudgeAnswer(correctAnswer);
+                        if (!normalizedAnswer) {
+                            errorMsg = `第${i + 1}行：判断题答案仅支持 对/错/正确/错误/T/F/√/×`;
+                        }
                     }
-                } else if (type === '单选题') {
-                    if (!['A', 'B', 'C', 'D', 'E', 'F'].includes(correctAnswer.toUpperCase())) {
-                        valid = false;
-                        errorMsg = `第${i + 1}行：单选题答案应为A-F`;
-                    }
-                } else if (type === '多选题') {
-                    const upperAnswer = correctAnswer.toUpperCase();
-                    if (!/^[ABCDEF]{2,}$/.test(upperAnswer)) {
-                        valid = false;
-                        errorMsg = `第${i + 1}行：多选题答案应为字母组合`;
+                } else {
+                    if (optionKeys.length < 2) {
+                        errorMsg = `第${i + 1}行：选择题至少需要两个有效选项`;
+                    } else {
+                        normalizedAnswer = normalizeChoiceAnswer(correctAnswer, type === '多选题');
+                        if (!normalizedAnswer) {
+                            errorMsg = type === '单选题'
+                                ? `第${i + 1}行：单选题答案格式错误，应为 A-F`
+                                : `第${i + 1}行：多选题答案格式错误，支持 AB、A,B、A B、A、B`;
+                        } else if (type === '多选题' && normalizedAnswer.length < 2) {
+                            errorMsg = `第${i + 1}行：多选题至少需要两个答案`;
+                        } else {
+                            const missingOptionKeys = normalizedAnswer
+                                .split('')
+                                .filter(key => !optionKeys.includes(key));
+                            if (missingOptionKeys.length > 0) {
+                                errorMsg = `第${i + 1}行：答案引用了不存在的选项 ${missingOptionKeys.join('、')}`;
+                            }
+                        }
                     }
                 }
 
-                if (!valid) {
+                if (errorMsg) {
                     errors.push(errorMsg);
                     continue;
                 }
 
-                const questionOptions = {};
-                if (type !== '判断题') {
-                    if (optionA) questionOptions.A = optionA;
-                    if (optionB) questionOptions.B = optionB;
-                    if (optionC) questionOptions.C = optionC;
-                    if (optionD) questionOptions.D = optionD;
-                    if (optionE) questionOptions.E = optionE;
-                    if (optionF) questionOptions.F = optionF;
-                }
-
-                const normalizedAnswer = type === '判断题' 
-                    ? (correctAnswer === '对' || correctAnswer === '正确' ? '对' : '错')
-                    : correctAnswer.toUpperCase();
-
                 newQuestions.push({
-                    id: Date.now() + Math.random(),
+                    id: Date.now() + i + Math.random(),
                     type,
                     category: category || '',
                     difficulty,
                     question: questionText,
-                    options: questionOptions,
+                    options: type === '判断题' ? {} : questionOptions,
                     answer: normalizedAnswer,
-                    analysis: analysis || '暂无解析'
+                    analysis
                 });
             }
 
@@ -2001,8 +2211,10 @@
                 examQuestions = [...examQuestions].sort(() => Math.random() - 0.5);
             }
 
+            currentExamId = null;
+            currentAnswerOrder = answerOrder;
             answerMapping = generateAnswerMapping(examQuestions, answerOrder);
-
+            progress.wrongAnswers = {};
             userAnswers = {};
             currentStudyIndex = 0;
             examStartTime = Date.now();
@@ -2016,6 +2228,7 @@
 
             renderQuestionIndicator();
             renderExamQuestion();
+            saveExamState();
             startTimer();
         }
 
@@ -2144,6 +2357,7 @@
             updateProgress();
             renderExamQuestion();
             renderQuestionIndicator();
+            saveExamState();
         }
 
         function prevQuestion() {
@@ -2210,6 +2424,7 @@
             clearExamState();
 
             let correct = 0, wrong = 0, missed = 0;
+            const examWrongAnswers = {};
 
             examQuestions.forEach(q => {
                 const qId = String(q.id);
@@ -2223,18 +2438,19 @@
                         correct++;
                     } else {
                         wrong++;
-                        progress.wrongAnswers[q.id] = { userAnswer: userAns, correctAnswer: q.answer };
+                        examWrongAnswers[qId] = { userAnswer: userAns, correctAnswer: q.answer };
                     }
                 } else {
                     if (userAns.toUpperCase() === q.answer.toUpperCase()) {
                         correct++;
                     } else {
                         wrong++;
-                        progress.wrongAnswers[q.id] = { userAnswer: userAns, correctAnswer: q.answer };
+                        examWrongAnswers[qId] = { userAnswer: userAns, correctAnswer: q.answer };
                     }
                 }
             });
 
+            progress.wrongAnswers = examWrongAnswers;
             const score = Math.round((correct / examQuestions.length) * 100);
 
             document.getElementById('scoreDisplay').textContent = score + '%';
@@ -2250,8 +2466,8 @@
                 wrong,
                 missed,
                 timeSpent: Math.floor((Date.now() - examStartTime) / 1000),
-                wrongQuestionIds: Object.keys(progress.wrongAnswers),
-                wrongAnswers: { ...progress.wrongAnswers }
+                wrongQuestionIds: Object.keys(examWrongAnswers),
+                wrongAnswers: { ...examWrongAnswers }
             };
             studyHistory.unshift(historyEntry);
             if (studyHistory.length > 20) studyHistory.pop();
@@ -2262,43 +2478,35 @@
             document.getElementById('examResult').classList.remove('hidden');
         }
 
-        function viewWrongQuestions() {
-            const wrongIds = Object.keys(progress.wrongAnswers);
-            const wrongQs = questions.filter(q => wrongIds.includes(String(q.id)));
-
-            if (wrongQs.length === 0) {
-                showToast('没有错题', 'success');
-                return;
-            }
-
-            const container = document.getElementById('wrongQuestionsArea');
+        function renderWrongQuestionCards(container, wrongQuestions, wrongAnswerMap, title, description = '') {
             const typeClass = { '单选题': 'type-single', '多选题': 'type-multi', '判断题': 'type-judge' };
             const difficultyText = { 1: '简单', 2: '中等', 3: '困难' };
+            const cardStyle = description ? ' style="margin-top: 20px;"' : '';
 
             container.innerHTML = `
-                <div class="card">
-                    <h2 class="card-title">错题解析</h2>
-                    ${wrongQs.map((q, idx) => {
-                        const wrongInfo = progress.wrongAnswers[q.id];
-                        const isMulti = q.type === '多选题';
-                        const userAnsStr = Object.keys(q.options).find(k => q.answer.includes(k)) || q.answer;
-                        const correctAnsStr = Object.keys(q.options).find(k => q.answer.includes(k)) || q.answer;
-                        
+                <div class="card"${cardStyle}>
+                    <h2 class="card-title">${title}</h2>
+                    ${description ? `<p style="color: var(--text-muted); margin-bottom: 20px;">${description}</p>` : ''}
+                    ${wrongQuestions.map((q, idx) => {
+                        const wrongInfo = wrongAnswerMap[String(q.id)] || { userAnswer: '', correctAnswer: q.answer };
+                        const userAnswer = toCellString(wrongInfo.userAnswer);
+                        const correctAnswer = toCellString(wrongInfo.correctAnswer) || q.answer;
+
                         let optionsHtml = '';
                         if (q.type === '判断题') {
                             optionsHtml = `
                                 <ul class="options-list">
-                                    <li class="option-item ${wrongInfo.userAnswer === '对' ? 'wrong' : ''} ${q.answer === '对' ? 'correct' : ''}">
+                                    <li class="option-item ${userAnswer === '对' ? 'wrong' : ''} ${correctAnswer === '对' ? 'correct' : ''}">
                                         <span class="option-letter">✓</span>
                                         <span>对</span>
-                                        ${q.answer === '对' ? '<span class="answer-badge">正确答案</span>' : ''}
-                                        ${wrongInfo.userAnswer === '对' ? '<span class="answer-badge user-ans">你的答案</span>' : ''}
+                                        ${correctAnswer === '对' ? '<span class="answer-badge">正确答案</span>' : ''}
+                                        ${userAnswer === '对' ? '<span class="answer-badge user-ans">你的答案</span>' : ''}
                                     </li>
-                                    <li class="option-item ${wrongInfo.userAnswer === '错' ? 'wrong' : ''} ${q.answer === '错' ? 'correct' : ''}">
+                                    <li class="option-item ${userAnswer === '错' ? 'wrong' : ''} ${correctAnswer === '错' ? 'correct' : ''}">
                                         <span class="option-letter">✗</span>
                                         <span>错</span>
-                                        ${q.answer === '错' ? '<span class="answer-badge">正确答案</span>' : ''}
-                                        ${wrongInfo.userAnswer === '错' ? '<span class="answer-badge user-ans">你的答案</span>' : ''}
+                                        ${correctAnswer === '错' ? '<span class="answer-badge">正确答案</span>' : ''}
+                                        ${userAnswer === '错' ? '<span class="answer-badge user-ans">你的答案</span>' : ''}
                                     </li>
                                 </ul>
                             `;
@@ -2306,8 +2514,8 @@
                             optionsHtml = `
                                 <ul class="options-list">
                                     ${Object.entries(q.options).map(([key, val]) => {
-                                        const isUserAnswer = wrongInfo.userAnswer && wrongInfo.userAnswer.includes(key);
-                                        const isCorrectAnswer = q.answer.includes(key);
+                                        const isUserAnswer = userAnswer.includes(key);
+                                        const isCorrectAnswer = correctAnswer.includes(key);
                                         return `
                                             <li class="option-item ${isUserAnswer ? 'wrong' : ''} ${isCorrectAnswer ? 'correct' : ''}">
                                                 <span class="option-letter">${key}</span>
@@ -2320,7 +2528,7 @@
                                 </ul>
                             `;
                         }
-                        
+
                         return `
                             <div class="question-card">
                                 <div class="question-header">
@@ -2331,14 +2539,14 @@
                                 </div>
                                 <div class="question-content">${parseMarkdown(q.question)}</div>
                                 ${optionsHtml}
-                                <div class="answer-section">
-                                    ${q.analysis ? `
+                                ${q.analysis ? `
+                                    <div class="answer-section">
                                         <div class="analysis">
                                             <div class="analysis-title">📝 解析</div>
                                             <div class="analysis-content">${parseMarkdown(q.analysis)}</div>
                                         </div>
-                                    ` : ''}
-                                </div>
+                                    </div>
+                                ` : ''}
                             </div>
                         `;
                     }).join('')}
@@ -2348,6 +2556,19 @@
             container.scrollIntoView({ behavior: 'smooth' });
         }
 
+        function viewWrongQuestions() {
+            const wrongIds = Object.keys(progress.wrongAnswers || {});
+            const wrongQs = questions.filter(q => wrongIds.includes(String(q.id)));
+
+            if (wrongQs.length === 0) {
+                showToast('没有错题', 'success');
+                return;
+            }
+
+            const container = document.getElementById('wrongQuestionsArea');
+            renderWrongQuestionCards(container, wrongQs, progress.wrongAnswers, '错题解析');
+        }
+
         function resetExam() {
             document.getElementById('examResult').classList.add('hidden');
             document.getElementById('wrongQuestionsArea').innerHTML = '';
@@ -2355,6 +2576,8 @@
             document.getElementById('examTime').value = '30';
             document.getElementById('examRange').value = 'all';
             document.getElementById('examOrder').value = 'sequence';
+            answerMapping = {};
+            currentAnswerOrder = 'sequence';
         }
 
         function renderProgress() {
@@ -2427,80 +2650,13 @@
             document.getElementById('examResult').classList.remove('hidden');
             
             const container = document.getElementById('wrongQuestionsArea');
-            const typeClass = { '单选题': 'type-single', '多选题': 'type-multi', '判断题': 'type-judge' };
-            const difficultyText = { 1: '简单', 2: '中等', 3: '困难' };
-            
-            container.innerHTML = `
-                <div class="card" style="margin-top: 20px;">
-                    <h2 class="card-title">历史错题解析 - ${new Date(history.date).toLocaleString()}</h2>
-                    <p style="color: var(--text-muted); margin-bottom: 20px;">得分: ${history.score}% | ${history.correct}对/${history.wrong}错</p>
-                    ${wrongQs.map((q, idx) => {
-                        const userAnsRaw = history.wrongAnswers ? history.wrongAnswers[String(q.id)] : '';
-                        const userAns = userAnsRaw ? (Array.isArray(userAnsRaw) ? userAnsRaw : [userAnsRaw]) : [];
-                        const correctAns = q.answer;
-                        
-                        let optionsHtml = '';
-                        if (q.type === '判断题') {
-                            optionsHtml = `
-                                <ul class="options-list">
-                                    <li class="option-item ${userAns.includes('对') ? 'wrong' : ''} ${correctAns.includes('对') ? 'correct' : ''}">
-                                        <span class="option-letter">✓</span>
-                                        <span>对</span>
-                                        ${correctAns.includes('对') ? '<span class="answer-badge">正确答案</span>' : ''}
-                                        ${userAns.includes('对') ? '<span class="answer-badge user-ans">你的答案</span>' : ''}
-                                    </li>
-                                    <li class="option-item ${userAns.includes('错') ? 'wrong' : ''} ${correctAns.includes('错') ? 'correct' : ''}">
-                                        <span class="option-letter">✗</span>
-                                        <span>错</span>
-                                        ${correctAns.includes('错') ? '<span class="answer-badge">正确答案</span>' : ''}
-                                        ${userAns.includes('错') ? '<span class="answer-badge user-ans">你的答案</span>' : ''}
-                                    </li>
-                                </ul>
-                            `;
-                        } else {
-                            optionsHtml = `
-                                <ul class="options-list">
-                                    ${Object.entries(q.options).map(([key, val]) => {
-                                        const isUserAnswer = userAns && userAns.includes(key);
-                                        const isCorrectAnswer = correctAns.includes(key);
-                                        return `
-                                            <li class="option-item ${isUserAnswer ? 'wrong' : ''} ${isCorrectAnswer ? 'correct' : ''}">
-                                                <span class="option-letter">${key}</span>
-                                                <span>${parseMarkdown(val)}</span>
-                                                ${isCorrectAnswer ? '<span class="answer-badge">正确答案</span>' : ''}
-                                                ${isUserAnswer ? '<span class="answer-badge user-ans">你的答案</span>' : ''}
-                                            </li>
-                                        `;
-                                    }).join('')}
-                                </ul>
-                            `;
-                        }
-                        
-                        return `
-                            <div class="question-card">
-                                <div class="question-header">
-                                    <span class="question-type ${typeClass[q.type]}">${q.type}</span>
-                                    ${q.difficulty ? `<span class="question-difficulty diff-${q.difficulty}">${difficultyText[q.difficulty] || '中等'}</span>` : ''}
-                                    ${q.category ? `<span class="question-category">${q.category}</span>` : ''}
-                                    <span class="question-id">#${idx + 1}</span>
-                                </div>
-                                <div class="question-content">${parseMarkdown(q.question)}</div>
-                                ${optionsHtml}
-                                ${q.analysis ? `
-                                    <div class="answer-section">
-                                        <div class="analysis">
-                                            <div class="analysis-title">📝 解析</div>
-                                            <div class="analysis-content">${parseMarkdown(q.analysis)}</div>
-                                        </div>
-                                    </div>
-                                ` : ''}
-                            </div>
-                        `;
-                    }).join('')}
-                </div>
-            `;
-            
-            container.scrollIntoView({ behavior: 'smooth' });
+            renderWrongQuestionCards(
+                container,
+                wrongQs,
+                history.wrongAnswers || {},
+                `历史错题解析 - ${new Date(history.date).toLocaleString()}`,
+                `得分: ${history.score}% | ${history.correct}对/${history.wrong}错/${history.missed}未答`
+            );
             showToast('查看历史错题', 'success');
         }
 
@@ -2750,11 +2906,14 @@
                 return;
             }
 
+            currentExamId = examId;
+            currentAnswerOrder = 'random';
             userAnswers = {};
             currentStudyIndex = 0;
             examStartTime = Date.now();
             examTimeLimit = exam.duration * 60;
-            answerMapping = generateAnswerMapping(examQuestions, 'random');
+            answerMapping = generateAnswerMapping(examQuestions, currentAnswerOrder);
+            progress.wrongAnswers = {};
 
             document.getElementById('examConfig').classList.add('hidden');
             document.getElementById('examContent').classList.remove('hidden');
@@ -2767,6 +2926,7 @@
             switchTab('exam');
             renderQuestionIndicator();
             renderExamQuestion();
+            saveExamState();
             startTimer();
         }
 
@@ -2796,7 +2956,7 @@
                     const data = new Uint8Array(event.target.result);
                     const workbook = XLSX.read(data, { type: 'array' });
                     const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-                    const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
+                    const jsonData = readSheetAsStringRows(firstSheet);
 
                     importExamFromData(jsonData);
                 } catch (err) {
@@ -2815,9 +2975,15 @@
                 return;
             }
 
-            const headers = data[0].map(h => h ? String(h).trim() : '');
-            const examNameHeader = headers.find(h => h.includes('考卷') || h.includes('名称') || h.includes('试卷') || h.includes('name'));
-            const questionHeader = headers.find(h => h.includes('题目') || h.includes('题号') || h.includes('question'));
+            const headers = data[0].map(toCellString);
+            const examNameHeader = headers.find(h => {
+                const lowerHeader = h.toLowerCase();
+                return h.includes('考卷') || h.includes('名称') || h.includes('试卷') || lowerHeader.includes('name');
+            });
+            const questionHeader = headers.find(h => {
+                const lowerHeader = h.toLowerCase();
+                return h.includes('题目') || h.includes('题号') || lowerHeader.includes('question');
+            });
 
             if (!examNameHeader || !questionHeader) {
                 hideProgress();
@@ -2836,8 +3002,8 @@
 
             for (let i = 1; i < data.length; i++) {
                 const row = data[i];
-                const examName = String(row[examNameIndex] || '').trim();
-                const questionText = String(row[questionIndex] || '').trim();
+                const examName = getCellString(row, examNameIndex);
+                const questionText = normalizeComparableText(getCellString(row, questionIndex));
 
                 if (!examName || !questionText) continue;
 
@@ -2851,9 +3017,12 @@
                     };
                 }
 
-                const matchedQuestion = questions.find(q => 
-                    q.question.includes(questionText) || questionText.includes(q.question.substring(0, 20))
-                );
+                const matchedQuestion = questions.find(q => {
+                    const normalizedQuestion = normalizeComparableText(q.question);
+                    return normalizedQuestion === questionText ||
+                        normalizedQuestion.includes(questionText) ||
+                        questionText.includes(normalizedQuestion);
+                });
                 
                 if (matchedQuestion) {
                     if (!examsMap[examName].questionIds.includes(matchedQuestion.id)) {
